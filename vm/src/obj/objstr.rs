@@ -327,93 +327,11 @@ impl PyString {
 
     #[pymethod(name = "__repr__")]
     fn repr(&self, vm: &VirtualMachine) -> PyResult<String> {
-        let in_len = self.value.len();
-        let mut out_len = 0usize;
-        // let mut max = 127;
-        let mut squote = 0;
-        let mut dquote = 0;
-
-        for ch in self.value.chars() {
-            let incr = match ch {
-                '\'' => {
-                    squote += 1;
-                    1
-                }
-                '"' => {
-                    dquote += 1;
-                    1
-                }
-                '\\' | '\t' | '\r' | '\n' => 2,
-                ch if ch < ' ' || ch as u32 == 0x7f => 4, // \xHH
-                ch if ch.is_ascii() => 1,
-                ch if char_is_printable(ch) => {
-                    // max = std::cmp::max(ch, max);
-                    1
-                }
-                ch if (ch as u32) < 0x100 => 4,   // \xHH
-                ch if (ch as u32) < 0x10000 => 6, // \uHHHH
-                _ => 10,                          // \uHHHHHHHH
-            };
-            if out_len > (std::isize::MAX as usize) - incr {
-                return Err(vm.new_overflow_error("string is too long to generate repr".to_owned()));
-            }
-            out_len += incr;
-        }
-
-        let (quote, unchanged) = {
-            let mut quote = '\'';
-            let mut unchanged = out_len == in_len;
-            if squote > 0 {
-                unchanged = false;
-                if dquote > 0 {
-                    // Both squote and dquote present. Use squote, and escape them
-                    out_len += squote;
-                } else {
-                    quote = '"';
-                }
-            }
-            (quote, unchanged)
-        };
-
-        out_len += 2; // quotes
-
-        let mut repr = String::with_capacity(out_len);
-        repr.push(quote);
-        if unchanged {
-            repr.push_str(&self.value);
-        } else {
-            for ch in self.value.chars() {
-                if ch == quote || ch == '\\' {
-                    repr.push('\\');
-                    repr.push(ch);
-                } else if ch == '\n' {
-                    repr.push_str("\\n")
-                } else if ch == '\t' {
-                    repr.push_str("\\t");
-                } else if ch == '\r' {
-                    repr.push_str("\\r");
-                } else if ch < ' ' || ch as u32 == 0x7F {
-                    repr.push_str(&format!("\\x{:02x}", ch as u32));
-                } else if ch.is_ascii() {
-                    repr.push(ch);
-                } else if !char_is_printable(ch) {
-                    let code = ch as u32;
-                    let escaped = if code < 0xff {
-                        format!("\\x{:02x}", code)
-                    } else if code < 0xffff {
-                        format!("\\u{:04x}", code)
-                    } else {
-                        format!("\\U{:08x}", code)
-                    };
-                    repr.push_str(&escaped);
-                } else {
-                    repr.push(ch)
-                }
-            }
-        }
-
-        repr.push(quote);
-        Ok(repr)
+        use std::fmt::Write;
+        let repr = PyStringRepr::try_from_str(&self.value, vm)?;
+        let mut buf = String::with_capacity(repr.len());
+        write!(&mut buf, "{}", repr).unwrap();
+        Ok(buf)
     }
 
     #[pymethod]
@@ -1656,6 +1574,120 @@ impl PySliceableSequence for String {
 
     fn is_empty(&self) -> bool {
         self.is_empty()
+    }
+}
+
+pub struct PyStringRepr<'a> {
+    value: &'a str,
+    out_len: usize,
+    quote: char,
+    unchanged: bool,
+}
+impl<'a> PyStringRepr<'a> {
+    /// Returns None if s is too long to be formatted
+    pub fn from_str(s: &'a str) -> Option<Self> {
+        let in_len = s.len();
+        let mut out_len = 0usize;
+        // let mut max = 127;
+        let mut squote = 0;
+        let mut dquote = 0;
+
+        for ch in s.chars() {
+            let incr = match ch {
+                '\'' => {
+                    squote += 1;
+                    1
+                }
+                '"' => {
+                    dquote += 1;
+                    1
+                }
+                '\\' | '\t' | '\r' | '\n' => 2,
+                ch if ch < ' ' || ch as u32 == 0x7f => 4, // \xHH
+                ch if ch.is_ascii() => 1,
+                ch if char_is_printable(ch) => {
+                    // max = std::cmp::max(ch, max);
+                    1
+                }
+                ch if (ch as u32) < 0x100 => 4,   // \xHH
+                ch if (ch as u32) < 0x10000 => 6, // \uHHHH
+                _ => 10,                          // \uHHHHHHHH
+            };
+            if out_len > (std::isize::MAX as usize) - incr {
+                return None;
+            }
+            out_len += incr;
+        }
+
+        let (quote, unchanged) = {
+            let mut quote = '\'';
+            let mut unchanged = out_len == in_len;
+            if squote > 0 {
+                unchanged = false;
+                if dquote > 0 {
+                    // Both squote and dquote present. Use squote, and escape them
+                    out_len += squote;
+                } else {
+                    quote = '"';
+                }
+            }
+            (quote, unchanged)
+        };
+
+        out_len += 2; // quotes
+
+        Some(Self {
+            value: s,
+            out_len,
+            quote,
+            unchanged,
+        })
+    }
+
+    pub fn try_from_str(s: &'a str, vm: &VirtualMachine) -> PyResult<Self> {
+        Self::from_str(s)
+            .ok_or_else(|| vm.new_overflow_error("string is too long to generate repr".to_owned()))
+    }
+
+    pub fn len(&self) -> usize {
+        self.out_len
+    }
+}
+impl fmt::Display for PyStringRepr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.quote)?;
+        if self.unchanged {
+            f.write_str(&self.value)?;
+        } else {
+            for ch in self.value.chars() {
+                if ch == self.quote || ch == '\\' {
+                    write!(f, "\\{}", ch)?
+                } else if ch == '\n' {
+                    f.write_str("\\n")?
+                } else if ch == '\t' {
+                    f.write_str("\\t")?
+                } else if ch == '\r' {
+                    f.write_str("\\r")?
+                } else if ch < ' ' || ch as u32 == 0x7F {
+                    write!(f, "\\x{:02x}", ch as u32)?
+                } else if ch.is_ascii() {
+                    write!(f, "{}", ch)?
+                } else if !char_is_printable(ch) {
+                    let code = ch as u32;
+                    if code < 0xff {
+                        write!(f, "\\x{:02x}", code)?
+                    } else if code < 0xffff {
+                        write!(f, "\\u{:04x}", code)?
+                    } else {
+                        write!(f, "\\U{:08x}", code)?
+                    }
+                } else {
+                    write!(f, "{}", ch)?
+                }
+            }
+        }
+
+        write!(f, "{}", self.quote)
     }
 }
 
