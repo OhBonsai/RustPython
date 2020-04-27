@@ -11,7 +11,7 @@ use super::objbyteinner::PyByteInner;
 use super::objbytes::PyBytes;
 use super::objfloat;
 use super::objmemory::PyMemoryView;
-use super::objstr::{PyString, PyStringRef};
+use super::objstr::{PyString, PyStringRef, PyStringRepr};
 use super::objtype::{self, PyClassRef};
 use crate::exceptions::PyBaseExceptionRef;
 use crate::format::FormatSpec;
@@ -864,8 +864,12 @@ fn detect_base(literal: &str) -> Option<u32> {
 }
 
 fn invalid_literal(vm: &VirtualMachine, literal: &str, base: &BigInt) -> PyBaseExceptionRef {
+    let literal = match PyStringRepr::try_from_str(literal, vm) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
     vm.new_value_error(format!(
-        "invalid literal for int() with base {}: '{}'",
+        "invalid literal for int() with base {}: {}",
         base, literal
     ))
 }
